@@ -1,0 +1,22 @@
+images:
+  tags:
+    bootstrap: docker.io/opensystemlab/rally-openstack:1.2.0
+    dep_check: registry.cicd.stg.taco/kubernetes-entrypoint:v0.3.1
+    db_init: docker.io/opensystemlab/rally-openstack:1.2.0
+    rally_db_sync: docker.io/opensystemlab/rally-openstack:1.2.0
+    run_task: docker.io/opensystemlab/rally-openstack:1.2.0
+    ks_user: registry.cicd.stg.taco/pike/ubuntu-source-heat-engine:0.1.0
+    ks_service: registry.cicd.stg.taco/pike/ubuntu-source-heat-engine:0.1.0
+    ks_endpoints: registry.cicd.stg.taco/pike/ubuntu-source-heat-engine:0.1.0
+    api: docker.io/opensystemlab/rally-openstack:1.2.0
+  pull_policy: Always
+
+enabled_tasks:
+  - nova
+
+pvc:
+  storage_class: ceph
+
+conf:
+  rally_tasks:
+    nova_task:

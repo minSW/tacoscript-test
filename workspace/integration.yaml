@@ -1,0 +1,108 @@
+enabled_tasks:
+  - nova
+
+conf:
+  rally_tasks:
+    nova_task:
+      GlanceImages.create_and_delete_image:
+      - args:
+          image_location: https://github.com/sktelecom-oslab/cirros-mirror/blob/master/cirros-0.3.5-x86_64-disk.img
+          container_format: bare
+          disk_format: qcow2
+        runner:
+          type: constant
+          times: 5
+          concurrency: 1
+        context:
+          users:
+            tenants: 1
+            users_per_tenant: 1
+        sla:
+          failure_rate:
+            max: 20
+      NovaServers.boot_and_delete_server:
+      - args:
+          flavor:
+            name: m1.tiny
+          image:
+            name: "^Cirros.*"
+          auto_assign_nic: true
+        runner:
+          type: constant
+          times: 5
+          concurrency: 1
+        context:
+          users:
+            tenants: 1
+            users_per_tenant: 1
+          existing_network: {}
+        sla:
+          failure_rate:
+            max: 20
+      NovaServers.boot_and_get_console_output:
+      - args:
+          flavor:
+            name: m1.tiny
+          image:
+            name: "^Cirros.*"
+          auto_assign_nic: true
+        runner:
+          type: constant
+          times: 5
+          concurrency: 1
+        context:
+          users:
+            tenants: 1
+            users_per_tenant: 1
+          existing_network: {}
+        sla:
+          failure_rate:
+            max: 20
+      NovaServers.boot_and_bounce_server:
+      - args:
+          flavor:
+            name: m1.tiny
+          image:
+            name: "^Cirros.*"
+          auto_assign_nic: true
+          force_delete: false
+          actions:
+          - hard_reboot: 1
+          - soft_reboot: 1
+          - stop_start: 1
+        runner:
+          type: constant
+          times: 5
+          concurrency: 1
+        context:
+          users:
+            tenants: 1
+            users_per_tenant: 1
+          existing_network: {}
+        sla:
+          failure_rate:
+            max: 20
+      NovaKeypair.create_and_list_keypairs:
+      - runner:
+          type: constant
+          times: 5
+          concurrency: 1
+        context:
+          users:
+            tenants: 1
+            users_per_tenant: 1
+        sla:
+          failure_rate:
+            max: 20
+      NeutronSecurityGroup.create_and_list_security_groups:
+      - runner:
+          type: constant
+          times: 5
+          concurrency: 1
+        context:
+          users:
+            tenants: 1
+            users_per_tenant: 1
+        sla:
+          failure_rate:
+            max: 20

@@ -1,0 +1,216 @@
+@Library('pipeline-library@master') _
+
+pipeline {
+  agent {
+    node {
+      label 'kube-tools-debug'
+      customWorkspace "workspace/${env.JOB_NAME}/${env.BUILD_NUMBER}"
+    }
+  }
+  parameters {
+    string(name: 'KUBE_CONTEXT',
+      defaultValue: 'k3',
+      description: 'kubectl context')
+    string(name: 'NAMESPACE',
+      defaultValue: 'openstack',
+      description: 'kubernetes namespace')
+    string(name: 'TASKS',
+      defaultValue: 'integration.yaml',
+      description: 'rally test file')
+  }
+  environment {
+    HELM_HOME = "${env.WORKSPACE}/.helm"
+    KUBECONFIG = "/root/.kube/config"
+    COOKIEMONSTER_ADDR = "127.0.0.1"
+  }
+  options {
+    timeout(time: 60, unit: 'MINUTES')
+    timestamps()
+  }
+
+  stages {
+    stage ('Init') {
+      steps {
+        container('tools') {
+          getKubeConfig()
+          helmInit()
+        }
+      }
+    }
+
+    stage ('Check Environment') {
+      steps {
+        container('tools') {
+          script {
+            // check kubernetes connectivity
+            kubeCheck = sh(returnStatus: true,
+              script: "kubectl version --context=${params.KUBE_CONTEXT}")
+            if (kubeCheck != 0) {
+              echo "kubectl test connection failed"
+              false
+            }
+  
+            // check namespace exists
+            namespaces = sh(returnStdout: true,
+              script: "kubectl get namespace -o jsonpath='{.items..metadata.name}' --context=${params.KUBE_CONTEXT}")
+            if (namespaces.contains(params.NAMESPACE)) {
+              echo "namespace ${params.NAMESPACE} exists. Cleaning up rally component..."
+              nsExists = true
+              // [Robert] temporary cleanup commands. Should be modified soon.
+              sh "helm delete --purge openstack-rally --kube-context=${params.KUBE_CONTEXT} || true"
+              sh "kubectl get jobs -n ${params.NAMESPACE} --context=${params.KUBE_CONTEXT} | grep rally | awk '{print \$1}' | while IFS= read -r ITEM; do kubectl delete job \$ITEM -n ${params.NAMESPACE} --context=${params.KUBE_CONTEXT}; done"
+            } else {
+              echo "namespace ${params.NAMESPACE} does not exist"
+              false
+            }
+  
+            // check cookiemonster namespaces
+            namespaces = sh(returnStdout: true,
+              script: "kubectl get namespace -o jsonpath='{.items..metadata.name}' --context=${params.KUBE_CONTEXT}")
+            if (namespaces.contains("cookiemonster")) {
+              echo "namespace cookiemonster does exist"
+              cleanupNamespace("cookiemonster", params.KUBE_CONTEXT)
+              sleep 60
+            } else {
+              echo "namespace cookiemonster does not exist"
+            }          
+          }
+        }
+      }
+    }
+
+    stage ('Setup Cookiemonster') {
+      steps {
+        container('tools') {
+          script {
+            checkout(
+              [
+                $class: 'GitSCM',
+                branches: [[
+                  name: '*/master'
+                ]],
+                doGenerateSubmoduleConfigurations: false,
+                extensions: [[
+                  $class: 'RelativeTargetDirectory',
+                  relativeTargetDir: 'cookiemonster'
+                ]],
+                submoduleCfg: [],
+                userRemoteConfigs: [[
+                  url: 'https://github.com/sktelecom-oslab/cookiemonster.git'
+                ]]
+              ]
+            )
+            dir ('cookiemonster') {
+              sh(returnStatus: true, script: "kubectl create -f ./k8s/ --context=${params.KUBE_CONTEXT}")
+              sh(returnStatus: true, script: "kubectl create -f ./k8s/ --context=${params.KUBE_CONTEXT}")
+              nodeAddress = sh(returnStdout: true,
+                script: "kubectl get nodes --context ${params.KUBE_CONTEXT} -o template --template='{{range.items}}{{range.status.addresses}}{{if eq .type \"InternalIP\"}}{{.address}}:{{end}}{{end}}{{end}}'")
+              COOKIEMONSTER_ADDRS = nodeAddress.split(":")
+              COOKIEMONSTER_ADDR = COOKIEMONSTER_ADDRS[0]
+            }
+            waitForReady("cookiemonster", params.KUBE_CONTEXT)
+          }
+        }
+      }
+    }
+
+    stage ('Run Cookiemonster') {
+      steps {
+        container('tools') {
+          script {
+            ansiColor('xterm') {
+              sh """
+                curl -X POST http://${COOKIEMONSTER_ADDR}:30003/api/v1/pod/start
+              """
+            }
+          }
+        }
+      }
+    }
+
+    stage ('Run Rally') {
+      steps {
+        container('tools') {
+          script {
+            ansiColor('xterm') {
+              dir("openstack-helm") {
+                git(
+                  credentialsId: 'oreobot',
+                  url: "https://tde.sktelecom.com/stash/scm/openstack/openstack-helm.git"
+                )
+              }
+
+              dir("openstack-helm-infra") {
+                git(
+                  credentialsId: 'oreobot',
+                  url: "https://tde.sktelecom.com/stash/scm/openstack/openstack-helm-infra.git"
+                )
+              }
+
+              sh """
+                cp rally_values.yaml openstack-helm/rally/values.yaml
+                HELM_TOOLKIT_CHART_LOCATION="file:\\/\\/..\\/..\\/openstack-helm-infra\\/helm-toolkit"
+                cd openstack-helm
+                sed -i "s/http:\\/\\/localhost:8879\\/charts/\$HELM_TOOLKIT_CHART_LOCATION/g" rally/requirements.yaml
+                sed -i "s/rally-manage/rally/g" rally/templates/bin/_manage-db.sh.tpl
+
+                helm dep up rally
+                helm install ./rally --name=openstack-rally --namespace=${params.NAMESPACE} --kube-context=${params.KUBE_CONTEXT} -f ${env.WORKSPACE}/values-overrides.yaml -f ${env.WORKSPACE}/${params.TASKS} --set endpoints.identity.port.api.internal=5000
+
+              """
+
+            }
+            sleep 10
+            println("Waiting for rally task")
+            rallyStatus=false
+
+            for (i=0;i <240;i++){
+              def rallyCheck = sh(returnStdout: true,
+                script: "kubectl get po -n ${params.NAMESPACE} --context=${params.KUBE_CONTEXT} --show-all=false")
+              println rallyCheck
+
+              if (rallyCheck.contains("rally-run-task")){
+                t = i * 10
+                println("Waiting for rally task to be finished for ${t}s..")
+              } else {
+                println("Rally task is completed in ${t}s.")
+                rallyStatus=true
+                break;
+              }
+              sleep 10
+            } 
+
+            collectLog(params.KUBE_CONTEXT, params.NAMESPACE, 'rally-run-task')
+
+            if (rallyStatus==false) {
+              error("Timed out waiting for rally task to finish.")
+            }
+          }
+        }
+      }
+    }
+  
+    stage ('Stop  Cookiemonster') {
+      steps {
+        container('tools') {
+          script {
+            ansiColor('xterm') {
+              sh """
+                curl -X POST http://${COOKIEMONSTER_ADDR}:30003/api/v1/pod/stop
+              """
+            }
+          }
+        }
+      }
+    }
+  }
+
+  post {
+    success {
+      notifyCompleted(true)
+    }
+    failure {
+      notifyCompleted(false)
+    }
+  }
+}
